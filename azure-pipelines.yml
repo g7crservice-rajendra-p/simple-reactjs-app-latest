@@ -130,7 +130,7 @@ stages:
           - task: AzureCLI@2
             displayName: 'Upload to $web container (Dev)'
             inputs:
-              azureSubscription: 'Az-Svc-Conn'
+              azureSubscription: 'AZURE_SERVICE_CONNECTION_DEV'
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               addSpnToEnvironment: true
