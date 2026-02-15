@@ -1,0 +1,186 @@
+# =============================================================================
+# Enterprise CI/CD Pipeline
+# React App → Azure Blob Storage Static Website
+# Multi-stage: Build + Branch-based Deploy (Dev / QA / Prod)
+# Variable groups selected per stage based on branch
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - dev
+      - qa
+      - prod
+
+pr:
+  branches:
+    include:
+      - dev
+      - qa
+      - prod
+
+# -----------------------------------------------------------------------------
+# Global Variables
+# -----------------------------------------------------------------------------
+variables:
+  nodeVersion: '20.x'
+  artifactName: 'drop'
+  buildOutputPath: 'build'
+  configFile: '.env'
+
+# =============================================================================
+# STAGE 1 - BUILD
+# =============================================================================
+stages:
+- stage: Build
+  displayName: 'Restore & Build'
+
+  variables:
+    - ${{ if eq(variables['Build.SourceBranchName'], 'dev') }}:
+        - group: testcase-api-dev-vg
+    # - ${{ if eq(variables['Build.SourceBranchName'], 'qa') }}:
+    #     - group: testcase-frontend-qa-vg
+    # - ${{ if eq(variables['Build.SourceBranchName'], 'prod') }}:
+    #     - group: testcase-frontend-prod-vg
+
+  jobs:
+  - job: BuildJob
+    displayName: 'Install & Build React'
+    pool:
+      vmImage: 'ubuntu-latest'
+    workspace:
+      clean: all
+
+    steps:
+    - task: NodeTool@0
+      displayName: 'Use Node.js $(nodeVersion)'
+      inputs:
+        versionSpec: $(nodeVersion)
+
+    - script: mkdir -p $(Pipeline.Workspace)/.npm
+      displayName: 'Create npm cache folder'
+
+    - task: Cache@2
+      displayName: 'Cache npm'
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(Pipeline.Workspace)/.npm
+
+    - script: npm ci --cache $(Pipeline.Workspace)/.npm
+      displayName: 'Install dependencies'
+
+    # Token replacement: {{VAR_NAME}} → Variable Group values (Replace Tokens extension)
+    - task: replacetokens@5
+      displayName: 'Replace tokens in .env'
+      inputs:
+        rootDirectory: '$(Pipeline.Workspace)'
+        targetFiles: '$(configFile)'
+        encoding: 'auto'
+        tokenPattern: 'custom'
+        tokenPrefix: '{{'
+        tokenSuffix: '}}'
+        writeBOM: false
+        actionOnMissing: 'warn'
+        actionOnNoFiles: 'continue'
+      continueOnError: false
+
+    - script: npm run build
+      displayName: 'Build React app'
+      env:
+        CI: 'true'
+        NODE_ENV: production
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish Build Artifact'
+      inputs:
+        targetPath: '$(Build.SourcesDirectory)/$(buildOutputPath)'
+        artifact: $(artifactName)
+        publishLocation: 'pipeline'
+
+# =============================================================================
+# STAGE 2a - DEPLOY TO DEV (dev branch only)
+# =============================================================================
+- stage: DeployDev
+  displayName: 'Deploy to Development'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'dev'))
+
+  variables:
+    - group: testcase-api-dev-vg
+
+  jobs:
+  - deployment: DeployDevJob
+    displayName: 'Deploy to Azure Static Website (Dev)'
+    environment: 'Development'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: DownloadPipelineArtifact@1
+            displayName: 'Download Artifact'
+            inputs:
+              buildType: 'current'
+              artifactName: $(artifactName)
+              targetPath: '$(Pipeline.Workspace)/drop'
+
+          - task: AzureCLI@2
+            displayName: 'Upload to $web container (Dev)'
+            inputs:
+              azureSubscription: 'Az-Svc-Conn'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              addSpnToEnvironment: true
+              inlineScript: |
+                az storage blob upload-batch \
+                  --overwrite \
+                  --source "$(Pipeline.Workspace)/drop" \
+                  --destination '$web' \
+                  --account-name $(storage_account_name) \
+                  --account-key $(storage_account_key)
+
+# =============================================================================
+# STAGE 2b - DEPLOY TO QA (qa branch only)
+# =============================================================================
+# - stage: DeployQA
+#   displayName: 'Deploy to QA'
+#   dependsOn: Build
+#   condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'qa'))
+
+#   variables:
+#     - group: testcase-frontend-qa-vg
+
+#   jobs:
+#   - deployment: DeployQAJob
+#     displayName: 'Deploy to Azure Static Website (QA)'
+#     environment: 'QA'
+#     pool:
+#       vmImage: 'ubuntu-latest'
+#     strategy:
+#       runOnce:
+#         deploy:
+#           steps:
+#           - task: DownloadPipelineArtifact@1
+#             displayName: 'Download Artifact'
+#             inputs:
+#               buildType: 'current'
+#               artifactName: $(artifactName)
+#               targetPath: '$(Pipeline.Workspace)/drop'
+
+#           - task: AzureCLI@2
+#             displayName: 'Upload to $web container (QA)'
+#             inputs:
+#               azureSubscription: 'SC-Azure-QA'
+#               scriptType: 'bash'
+#               scriptLocation: 'inlineScript'
+#               addSpnToEnvironment: true
+#               inlineScript: |
+#                 az storage blob upload-batch \
+#                   --overwrite \
+#                   --source "$(Pipeline.Workspace)/drop" \
+#                   --destination '$web' \
+#                   --account-name $(storage_account_name) \
+#                   --account-key $(storage_account_key)
